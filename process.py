@@ -3,7 +3,9 @@ import os
 import sys
 from subprocess import call
 from os.path import expanduser
+import json
 
+ZIPPED_DIRECTORY = "0_zipped/"
 UNZIPPED_DIRECTORY = "1_unzipped/"
 JOINED_DIRECTORY = "2_joined/"
 CONCAT_DIRECTORY = "3_concat_filter/"
@@ -18,9 +20,16 @@ folders = [UNZIPPED_DIRECTORY, JOINED_DIRECTORY, CONCAT_DIRECTORY, UNIQUES_DIREC
 F_PRIMER = 'GTGCCAGCMGCCGCGGTAA'
 F_OFFSET = 3
 R_PRIMER = 'GGACTACHVGGGTWTCTAAT'
-MIN_LENGTH_THRESHOLD = 90
+MIN_LENGTH_THRESHOLD = 140
 
-walk_dir = sys.argv[1]
+FULL_FASTA = 'full'
+
+walk_dir = ''
+print sys.argv
+if len(sys.argv) == 1:
+    walk_dir = ZIPPED_DIRECTORY
+else:
+    walk_dir = sys.argv[1]
 
 def makeFolders(folders):
     for folder in folders:
@@ -30,16 +39,19 @@ makeFolders(folders)
 
 prefix = 'ssr_'
 
-
-def unzip():
+def unzip(lookup_table):
     for root, subdirs, files in os.walk(walk_dir):
         if len(files) > 0:
             for f in files:
                 if f.split('.')[-1] == 'gz':
-                    print 'Copying/Unzipping ' + f
-                    call(["cp", os.path.join(root, f), UNZIPPED_DIRECTORY])
                     identifier = f[9:]
-                    newname = os.path.join(root, f).split('/')[-2] + identifier
+                    kID = os.path.join(root, f).split('/')[-2]
+                    if kID not in lookup_table:
+                        print 'kID ' + str(kID) + ' not found!!!'
+                        break
+                    print 'Copying/Unzipping ' + f                   
+                    call(["cp", os.path.join(root, f), UNZIPPED_DIRECTORY])
+                    newname = lookup_table[kID] + identifier
                     call(["mv", UNZIPPED_DIRECTORY + f, UNZIPPED_DIRECTORY + newname])
                     call(["gunzip", UNZIPPED_DIRECTORY + newname, '-f'])
 
@@ -102,7 +114,7 @@ def L00_concat_filter():
         call(command, shell=True)
 
 
-        command = 'usearch -fastq_filter ' + CONCAT_DIRECTORY + pre + 'L001.concat.fastq -relabel cluster. -fastq_minlen ' + str(MIN_LENGTH_THRESHOLD) + ' -fastqout ' + CONCAT_DIRECTORY + pre + 'L001.filtered.fastq'
+        command = 'usearch -fastq_filter ' + CONCAT_DIRECTORY + pre + 'L001.concat.fastq -relabel @ -fastq_minlen ' + str(MIN_LENGTH_THRESHOLD) + ' -fastqout ' + CONCAT_DIRECTORY + pre + 'L001.filtered.fastq'
         print 'filtering', cats
         call(command, shell=True)
 
@@ -130,51 +142,123 @@ def unique():
 
     for f in trimmed:
         print trimmed.index(f), len(trimmed)
-        call(['usearch',
-            '-fastx_uniques', TRIMMED_DIRECTORY + f,
-            '-sizeout', '-relabel', 'Uniq.',
-            '-fastaout', UNIQUES_DIRECTORY + f.split('.')[0] + '.unique.fasta'
+        call(['vsearch',
+            '--threads', '16',
+            '--derep_fulllength', TRIMMED_DIRECTORY + f,
+            '--sizeout',
+            '--output', UNIQUES_DIRECTORY + f.split('.')[0] + '.unique.fasta',
+            '--relabel', f.split('_')[0] + '.',
+            '--fasta_width', '0'
             ])
 
-def OTUs():
+def full_concatentation_all_reads():
+    trimmed = []
+    for f in listdir(TRIMMED_DIRECTORY):
+        if 'trimmed' in f:
+            trimmed.append(TRIMMED_DIRECTORY + f)
+
+    command = 'cat '
+    for c in trimmed:
+        command += c
+        command += ' '
+    command += '> all_reads.fasta'
+    # print 'concatenating', trimmed
+    call(command, shell=True)
+    # print command
+
+def full_concatentation_unique():
     uniques = []
     for f in listdir(UNIQUES_DIRECTORY):
-        if 'unique' in f:
-            uniques.append(f)
+        if 'unique' in f and FULL_FASTA not in f:
+            uniques.append(UNIQUES_DIRECTORY + f)
 
-    for f in uniques:
-        print uniques.index(f), len(uniques)
-        call(['usearch',
-            '-cluster_otus', UNIQUES_DIRECTORY + f,
-            '-otus', OTU_DIRECTORY + f.split('.')[0] + '.OTU.fasta',        
-            '-uparseout', OTU_PARSE_DIRECTORY + f.split('.')[0] + '.up',
-            '-relabel', 'OTU', '-minsize', '2'
+    command = 'cat '
+    for c in uniques:
+        command += c
+        command += ' '
+    command += '> ' + FULL_FASTA + '.unique.fasta'
+    # print 'concatenating', trimmed
+    call(command, shell=True)
+    # print command
+
+def dereplicate_full_uniques():
+    call(['vsearch',
+        '--threads', '16',
+        '--derep_fulllength', 'full.unique.fasta',
+        '--minuniquesize', '2',
+        '--sizein',
+        '--sizeout',
+        '--fasta_width', '0',
+        '--uc', 'full.derep.uc',
+        '--output', 'full.derep.fasta'
         ])
 
-def assign_OTUs():
-    OTUs = []
-    for f in listdir(OTU_DIRECTORY):
-        if 'OTU' in f:
-            OTUs.append(f)
-
-    for f in OTUs:
-        print OTUs.index(f), len(OTUs)
-        call(['usearch',
-            '-usearch_global', TRIMMED_DIRECTORY + f.split('.')[0] + '.trimmed.fasta',
-            '-db', OTU_DIRECTORY + f.split('.')[0] + '.OTU.fasta',        
-            '-strand', 'plus',
-            '-id', '0.97',
-            '-otutabout', TABLE_DIRECTORY + f.split('.')[0] + '.table.txt',
-            '-biomout', TABLE_DIRECTORY + f.split('.')[0] + '.table.json',
-            ''
+def precluster():
+    call(['vsearch',
+        '--threads', '16',
+        '--cluster_size', 'full.derep.fasta',
+        '--id', '.98',
+        '--strand', 'plus',
+        '--sizein',
+        '--sizeout',
+        '--fasta_width', '0',
+        '--uc', 'full.preclustered.uc',
+        '--centroids', 'full.preclustered.fasta'
         ])
 
+def denovo_chimera():
+    call(['vsearch',
+        '--threads', '16',
+        '--uchime_denovo', 'full.preclustered.fasta',
+        '--sizein',
+        '--sizeout',
+        '--fasta_width', '0',
+        '--nonchimeras', 'full.denovo.nonchimeras.fasta'
+        ])
+
+def reference_chimera():
+    call(['vsearch',
+        '--threads', '16',
+        '--uchime_ref', 'full.denovo.nonchimeras.fasta',
+        '-db', 'silva.bacteria/silva.gold.ng.fasta',
+        '--sizein',
+        '--sizeout',
+        '--fasta_width', '0',
+        '--nonchimeras', 'full.ref.nonchimeras.fasta'
+        ])
+
+def extract_nonchimeras():
+    call('perl map.pl full.derep.fasta full.preclustered.uc full.ref.nonchimeras.fasta > full.nonchimeras.derep.fasta', shell = True)
+    call('perl map.pl full.unique.fasta full.derep.uc full.nonchimeras.derep.fasta > full.nonchimeras.fasta', shell = True)
+
+def OTUs():
+    call(['vsearch',
+        '--threads', '16',
+        '--cluster_size', 'full.nonchimeras.fasta',
+        '--id',' 0.97',
+        '--strand', 'plus',
+        '--sizein',
+        '--sizeout',
+        '--fasta_width', '0',
+        '--uc', 'full.clustered.uc',
+        '--relabel', 'OTU_',
+        '--centroids', 'full.otus.fasta',
+        '--otutabout', 'full.otutab.txt'
+        ])
+ 
+# lookup_table = json.loads(open('lookup_table.json','r').read())
 
 
-# unzip()
+# unzip(lookup_table)
 # pre_join()
 # L00_concat_filter()
 # trim()
 # unique()
+# full_concatentation_unique()
+# dereplicate_full_uniques()
+# precluster()
+# denovo_chimera()
+# reference_chimera()
+# extract_nonchimeras()
 # OTUs()
-# assign_OTUs()
+# full_concatentation_all_reads()
